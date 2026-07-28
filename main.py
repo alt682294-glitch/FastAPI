@@ -1,0 +1,132 @@
+"""
+WePlay Unban Installer — FastAPI backend.
+
+Hides the loadly.io API key from the browser and proxies three endpoints:
+  - GET /api/apps                       -> loadly.io /apiv2/app/listMy
+  - GET /api/apps/{buildKey}            -> loadly.io /apiv2/app/view
+  - GET /api/apps/{buildKey}/install    -> loadly.io /apiv2/app/install
+"""
+
+import os
+import logging
+from pathlib import Path
+
+import httpx
+from fastapi import FastAPI, APIRouter, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+from dotenv import load_dotenv
+
+ROOT_DIR = Path(__file__).parent
+load_dotenv(ROOT_DIR / ".env")
+
+LOADLY_API_BASE = os.environ.get("LOADLY_API_BASE", "https://api.loadly.io")
+LOADLY_API_KEY = os.environ.get("LOADLY_API_KEY")
+
+if not LOADLY_API_KEY:
+    logging.warning("LOADLY_API_KEY is not set — /api/apps* endpoints will return 500.")
+
+app = FastAPI(title="WePlay Unban Installer API")
+api_router = APIRouter(prefix="/api")
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger("weplay")
+
+
+async def _loadly_post(path: str, form: dict) -> dict:
+    """POST form data to loadly.io and return parsed JSON."""
+    if not LOADLY_API_KEY:
+        raise HTTPException(status_code=500, detail="LOADLY_API_KEY not configured on server.")
+
+    payload = {"_api_key": LOADLY_API_KEY, **form}
+    url = f"{LOADLY_API_BASE}{path}"
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                url,
+                data=payload,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+    except httpx.HTTPError as exc:
+        logger.exception("loadly.io request failed: %s", exc)
+        raise HTTPException(status_code=502, detail=f"Upstream request failed: {exc}") from exc
+
+    try:
+        data = resp.json()
+    except ValueError:
+        logger.error("loadly.io returned non-JSON (status %s): %s", resp.status_code, resp.text[:300])
+        raise HTTPException(status_code=502, detail="Upstream returned non-JSON response.")
+
+    return data
+
+
+@api_router.get("/")
+async def root():
+    return {"service": "weplay-unban-installer", "status": "ok"}
+
+
+@api_router.get("/apps")
+async def list_apps(page: int = Query(1, ge=1)):
+    """List apps on the loadly account."""
+    return await _loadly_post("/apiv2/app/listMy", {"page": str(page)})
+
+
+@api_router.get("/apps/{build_key}")
+async def get_app_details(build_key: str, appKey: str = Query(..., description="loadly appKey")):
+    """Fetch full app details (screenshots, description, etc.)."""
+    return await _loadly_post(
+        "/apiv2/app/view",
+        {"appKey": appKey, "buildKey": build_key},
+    )
+
+
+@api_router.get("/apps/{build_key}/install")
+async def get_install_url(build_key: str):
+    """
+    Ask loadly.io for the install URL for the given buildKey and return it to the
+    browser so the frontend can redirect (or open) it.
+
+    Response shape:
+      { "installUrl": "<itms-services://... or https://... URL>", "raw": {...} }
+    """
+    data = await _loadly_post("/apiv2/app/install", {"buildKey": build_key})
+
+    # If upstream signalled an error, bubble it up instead of returning a
+    # fallback URL that would leak the API key.
+    if isinstance(data, dict) and data.get("code") not in (0, None):
+        raise HTTPException(
+            status_code=404,
+            detail=data.get("message") or data.get("msg") or "Install lookup failed.",
+        )
+
+    install_url = None
+    if isinstance(data, dict):
+        payload = data.get("data") or {}
+        if isinstance(payload, dict):
+            install_url = (
+                payload.get("installUrl")
+                or payload.get("install_url")
+                or payload.get("url")
+                or payload.get("downloadUrl")
+            )
+        if not install_url and isinstance(payload, str):
+            install_url = payload
+
+    if not install_url:
+        raise HTTPException(status_code=502, detail="Upstream did not return an install URL.")
+
+    return {"installUrl": install_url, "raw": data}
+
+
+app.include_router(api_router)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_credentials=False,
+    allow_origins=os.environ.get("CORS_ORIGINS", "*").split(","),
+    allow_methods=["GET", "OPTIONS"],
+    allow_headers=["*"],
+)
