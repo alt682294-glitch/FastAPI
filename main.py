@@ -14,6 +14,7 @@ from pathlib import Path
 import httpx
 from fastapi import FastAPI, APIRouter, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 from dotenv import load_dotenv
 
 ROOT_DIR = Path(__file__).parent
@@ -61,6 +62,12 @@ async def _loadly_post(path: str, form: dict) -> dict:
         raise HTTPException(status_code=502, detail="Upstream returned non-JSON response.")
 
     return data
+
+
+@app.get("/")
+async def root_index():
+    """Redirect root to /api/ so the browser never sees a 404."""
+    return RedirectResponse(url="/api/")
 
 
 @api_router.get("/")
