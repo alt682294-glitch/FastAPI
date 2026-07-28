@@ -14,7 +14,7 @@ from pathlib import Path
 import httpx
 from fastapi import FastAPI, APIRouter, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, JSONResponse
 from dotenv import load_dotenv
 
 ROOT_DIR = Path(__file__).parent
@@ -27,6 +27,22 @@ if not LOADLY_API_KEY:
     logging.warning("LOADLY_API_KEY is not set — /api/apps* endpoints will return 500.")
 
 app = FastAPI(title="WePlay Unban Installer API")
+
+# CORS must be added BEFORE routers so it wraps every route
+_cors_origins = os.environ.get("CORS_ORIGINS", "*")
+if not _cors_origins or _cors_origins.strip() == "":
+    _cors_origins = "*"
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[o.strip() for o in _cors_origins.split(",")],
+    allow_credentials=False,
+    allow_methods=["GET", "OPTIONS"],
+    allow_headers=["*"],
+    expose_headers=["*"],
+    max_age=600,
+)
+
 api_router = APIRouter(prefix="/api")
 
 logging.basicConfig(
@@ -129,11 +145,3 @@ async def get_install_url(build_key: str):
 
 
 app.include_router(api_router)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_credentials=False,
-    allow_origins=os.environ.get("CORS_ORIGINS", "*").split(","),
-    allow_methods=["GET", "OPTIONS"],
-    allow_headers=["*"],
-)
